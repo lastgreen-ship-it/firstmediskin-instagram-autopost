@@ -1,0 +1,91 @@
+name: Instagram 자동 게시 (퍼스트메디스킨)
+
+# 하루 1건(오전 슬롯) 게시. GitHub 예약이 수 시간 지연/누락되는 문제 대비로
+# 오전~오후에 걸쳐 게시 시도를 여러 번 분산. 이미 오늘 게시가 끝났으면
+# pick()이 미게시분을 못 찾아 exit 2(정상 종료)로 아무것도 안 올림 → 중복 없음.
+on:
+  schedule:
+    # UTC 매 정시(00~09) = KST 09:00~18:00, :12분. 지연돼도 그날 안에 하나는 실행되도록 분산.
+    - cron: "12 0 * * *"   # 09:12 KST
+    - cron: "12 1 * * *"   # 10:12 KST
+    - cron: "12 2 * * *"   # 11:12 KST
+    - cron: "12 3 * * *"   # 12:12 KST
+    - cron: "12 4 * * *"   # 13:12 KST
+    - cron: "12 5 * * *"   # 14:12 KST
+    - cron: "12 6 * * *"   # 15:12 KST
+    - cron: "12 7 * * *"   # 16:12 KST
+    - cron: "12 8 * * *"   # 17:12 KST
+    - cron: "12 9 * * *"   # 18:12 KST
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: "게시할 슬롯 (am 또는 pm)"
+        required: true
+        default: "am"
+        type: choice
+        options:
+          - am
+          - pm
+
+permissions:
+  contents: write   # 게시 후 content_queue.json(posted=true) 커밋을 위해 필요
+
+concurrency:
+  group: instagram-autopost
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+        with:
+          ref: main   # 항상 최신 main 기준(여러 예약이 겹쳐도 직전 게시 결과를 반영해 중복 방지)
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 라이브러리 설치
+        run: pip install requests
+
+      - name: 슬롯 결정
+        id: slot
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "slot=${{ github.event.inputs.slot }}" >> "$GITHUB_OUTPUT"
+          else
+            # 하루 1건 운영 = 항상 am 슬롯의 '오늘' 항목을 게시. 여러 번 실행돼도
+            # 이미 게시됐으면 pick()이 None → exit 2로 안 올림(중복 방지).
+            echo "slot=am" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 게시 실행
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}   # 없으면 스크립트 기본값 사용
+        run: |
+          set +e
+          python instagram_post.py --slot ${{ steps.slot.outputs.slot }}
+          code=$?
+          # 종료코드 2 = 게시할 콘텐츠 없음 → 실패가 아니라 정상으로 처리
+          if [ "$code" = "2" ]; then
+            echo "게시할 콘텐츠 없음 — 정상 종료로 처리"
+            exit 0
+          fi
+          exit $code
+
+      - name: 게시 결과(posted 표시) 커밋
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add content_queue.json post_log.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "변경 없음 — 커밋 생략"
+          else
+            git commit -m "chore: 게시 상태 업데이트 [skip ci]"
+            git push
+          fi
